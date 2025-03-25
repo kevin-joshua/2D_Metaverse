@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebSocket Game</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+    #game-container {
+      position: relative;
+      width: 800px;
+      height: 600px;
+      background-color: #f0f0f0;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 2px solid #333;
+    }
+    .player {
+      position: absolute;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: bold;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+      transition: transform 0.1s ease-out;
+    }
+    .player.my-player {
+      border: 2px solid white;
+    }
+    #status {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      padding: 5px 10px;
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white;
+      border-radius: 5px;
+      z-index: 10;
+    }
+    #instructions {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      padding: 5px 10px;
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white;
+      border-radius: 5px;
+      z-index: 10;
+    }
+    #player-count {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 5px 10px;
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white;
+      border-radius: 5px;
+      z-index: 10;
+    }
+    .collision-animation {
+      animation: bump 0.3s ease-out;
+    }
+    @keyframes bump {
+      0% { transform: translate(-50%, -50%) scale(1); }
+      50% { transform: translate(-50%, -50%) scale(1.1); }
+      100% { transform: translate(-50%, -50%) scale(1); }
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <div id="status">Connecting...</div>
+    <div id="instructions">Use arrow keys or click/tap to move</div>
+    <div id="player-count">Players: 0</div>
+  </div>
+
+  <script>
+    // Game state
+    const game = {
+      players: {},
+      myId: null,
+      ws: null,
+      lastPos: { x: 0, y: 0 },
+      config: {
+        worldWidth: 800,
+        worldHeight: 600,
+        playerRadius: 15
+      }
+    };
+
+    // DOM elements
+    const gameContainer = document.getElementById('game-container');
+    const statusElement = document.getElementById('status');
+    const playerCountElement = document.getElementById('player-count');
+
+    // Connect to WebSocket server
+    const connectToServer = () => {
+      // Change the URL to match your server address
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${window.location.hostname}:8080`;
+      
+      statusElement.textContent = 'Connecting...';
+      
+      game.ws = new WebSocket(wsUrl);
+      
+      // Connection opened
+      game.ws.onopen = () => {
+        statusElement.textContent = 'Connected!';
+      };
+      
+      // Listen for messages
+      game.ws.onmessage = ({ data }) => {
+        const message = JSON.parse(data);
+        handleMessage(message);
+      };
+      
+      // Connection closed
+      game.ws.onclose = () => {
+        statusElement.textContent = 'Disconnected. Reconnecting...';
+        // Try to reconnect after a short delay
+        setTimeout(connectToServer, 3000);
+      };
+      
+      // Connection error
+      game.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        statusElement.textContent = 'Connection error!';
+      };
+    };
+
+    // Handle incoming messages
+    const handleMessage = (message) => {
+      switch (message.type) {
+        case 'init':
+          // Initialize game with player ID, game config and existing players
+          game.myId = message.id;
+          
+          // Set game configuration if provided
+          if (message.config) {
+            game.config = message.config;
+            
+            // Update game container dimensions
+            gameContainer.style.width = `${game.config.worldWidth}px`;
+            gameContainer.style.height = `${game.config.worldHeight}px`;
+          }
+          
+          statusElement.textContent = `Connected as Player ${game.myId}`;
+          
+          // Add existing players
+          Object.values(message.players).forEach(player => {
+            addPlayer(player);
+          });
+          
+          updatePlayerCount();
+          break;
+          
+        case 'newPlayer':
+          // Add new player
+          addPlayer(message.player);
+          updatePlayerCount();
+          break;
+          
+        case 'playerMove':
+          // Update player position
+          if (game.players[message.id]) {
+            movePlayer(message.id, message.x, message.y);
+            
+            // If this is our own player and position differs from requested, it means collision happened
+            if (message.id === game.myId && 
+                (Math.abs(message.x - game.lastPos.x) > 1 || Math.abs(message.y - game.lastPos.y) > 1)) {
+              // Show collision animation
+              const playerElement = game.players[message.id].element;
+              playerElement.classList.add('collision-animation');
+              
+              // Remove the animation class after it completes
+              setTimeout(() => {
+                playerElement.classList.remove('collision-animation');
+              }, 300);
+            }
+          }
+          break;
+          
+        case 'playerDisconnect':
+          // Remove disconnected player
+          removePlayer(message.id);
+          updatePlayerCount();
+          break;
+      }
+    };
+
+    // Add a player to the game
+    const addPlayer = (player) => {
+      // Create player element if it doesn't exist
+      if (!game.players[player.id]) {
+        const playerElement = document.createElement('div');
+        playerElement.className = 'player';
+        playerElement.id = `player-${player.id}`;
+        playerElement.textContent = player.id;
+        playerElement.style.backgroundColor = player.color;
+        
+        // Set player size based on config
+        const size = game.config.playerRadius * 2;
+        playerElement.style.width = `${size}px`;
+        playerElement.style.height = `${size}px`;
+        
+        // Highlight the player's own avatar
+        if (player.id === game.myId) {
+          playerElement.classList.add('my-player');
+        }
+        
+        gameContainer.appendChild(playerElement);
+        
+        game.players[player.id] = {
+          element: playerElement,
+          x: player.x,
+          y: player.y,
+          color: player.color
+        };
+        
+        // Position the player
+        movePlayer(player.id, player.x, player.y);
+      }
+    };
+
+    // Move a player to a new position
+    const movePlayer = (id, x, y) => {
+      const player = game.players[id];
+      if (player) {
+        player.x = x;
+        player.y = y;
+        player.element.style.left = `${x}px`;
+        player.element.style.top = `${y}px`;
+      }
+    };
+
+    // Remove a player from the game
+    const removePlayer = (id) => {
+      if (game.players[id]) {
+        gameContainer.removeChild(game.players[id].element);
+        delete game.players[id];
+      }
+    };
+    
+    // Update the player count display
+    const updatePlayerCount = () => {
+      const count = Object.keys(game.players).length;
+      playerCountElement.textContent = `Players: ${count}`;
+    };
+
+    // Handle keyboard movement
+    const handleKeyDown = (e) => {
+      if (!game.myId) return;
+      
+      const player = game.players[game.myId];
+      if (!player) return;
+      
+      let { x, y } = player;
+      const step = 10;
+      
+      switch (e.key) {
+        case 'ArrowUp':
+          y -= step;
+          break;
+        case 'ArrowDown':
+          y += step;
+          break;
+        case 'ArrowLeft':
+          x -= step;
+          break;
+        case 'ArrowRight':
+          x += step;
+          break;
+        default:
+          return; // Exit if not an arrow key
+      }
+      
+      // Ensure player stays within boundaries
+      x = Math.max(game.config.playerRadius, Math.min(game.config.worldWidth - game.config.playerRadius, x));
+      y = Math.max(game.config.playerRadius, Math.min(game.config.worldHeight - game.config.playerRadius, y));
+      
+      // Update locally for responsive movement
+      movePlayer(game.myId, x, y);
+      sendMovement(x, y);
+    };
+
+    // Handle mouse/touch movement
+    const handleClick = (e) => {
+      if (!game.myId) return;
+      
+      // Get click position relative to the game container
+      const rect = gameContainer.getBoundingClientRect();
+      const x = (e.clientX || (e.touches && e.touches[0].clientX)) - rect.left;
+      const y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
+      
+      if (x !== undefined && y !== undefined) {
+        // Ensure player stays within boundaries
+        const boundedX = Math.max(game.config.playerRadius, Math.min(game.config.worldWidth - game.config.playerRadius, x));
+        const boundedY = Math.max(game.config.playerRadius, Math.min(game.config.worldHeight - game.config.playerRadius, y));
+        
+        // Update locally for responsive movement
+        movePlayer(game.myId, boundedX, boundedY);
+        sendMovement(boundedX, boundedY);
+      }
+    };
+
+    // Send movement to the server
+    const sendMovement = (x, y) => {
+      // Update last position
+      game.lastPos = { x, y };
+      
+      // Send if connection is open
+      if (game.ws && game.ws.readyState === WebSocket.OPEN) {
+        game.ws.send(JSON.stringify({
+          type: 'move',
+          x,
+          y
+        }));
+      }
+    };
+
+    // Set up event listeners
+    document.addEventListener('keydown', handleKeyDown);
+    gameContainer.addEventListener('click', handleClick);
+    gameContainer.addEventListener('touchstart', handleClick);
+
+    // Start the game
+    connectToServer();
+  </script>
+</body>
+</html>
